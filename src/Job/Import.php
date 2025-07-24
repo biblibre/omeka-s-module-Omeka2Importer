@@ -104,20 +104,24 @@ class Import extends AbstractJob
         if ($perPage = $this->getArg('perPage', false)) {
             $params = ['per_page' => $perPage];
         } else {
-            $params = [];
+            $params = ['per_page' => 10];
         }
 
         $itemSetUpdateData = [];
         do {
             $params['page'] = $page;
+            $this->logger->info("Importing collection page $page");
+            $this->flushEntityManager();
             try {
                 $clientResponse = $this->client->collections->get(null, $params);
             } catch (\Exception $e) {
                 $this->logger->err((string) $e);
+                $this->flushEntityManager();
                 continue;
             }
             if (!$clientResponse->isOK()) {
                 $this->logger->err('HTTP problem: ' . $clientResponse->getStatusCode() . ' ' . $clientResponse->getReasonPhrase());
+                $this->flushEntityManager();
                 continue;
             }
             $collectionsData = json_decode($clientResponse->getBody(), true);
@@ -174,7 +178,7 @@ class Import extends AbstractJob
         if ($perPage = $this->getArg('perPage', false)) {
             $params = ['per_page' => $perPage];
         } else {
-            $params = [];
+            $params = ['per_page' => 10];
         }
 
         //if importing by collections from Omeka 2, the collection to use as
@@ -182,15 +186,18 @@ class Import extends AbstractJob
         do {
             $params['page'] = $page;
             $this->logger->info("Importing item page $page");
+            $this->flushEntityManager();
 
             try {
                 $clientResponse = $this->client->items->get(null, $params);
             } catch (\Exception $e) {
                 $this->logger->err((string) $e);
+                $this->flushEntityManager();
                 continue;
             }
             if (!$clientResponse->isOK()) {
                 $this->logger->err('HTTP problem: ' . $clientResponse->getStatusCode() . ' ' . $clientResponse->getReasonPhrase());
+                $this->flushEntityManager();
                 continue;
             }
 
@@ -241,14 +248,22 @@ class Import extends AbstractJob
 
     protected function createItems($toCreate)
     {
+        $this->logger->info(sprintf('Importing Omeka Classic items: %s', implode(', ', array_keys($toCreate))));
+        $this->flushEntityManager();
+
         $createResponse = $this->api->batchCreate('items', $toCreate, [], ['continueOnError' => true]);
         $createContent = $createResponse->getContent();
         $this->addedCount = $this->addedCount + count($createContent);
         $createImportRecordsJson = [];
 
+        $itemIds = [];
         foreach ($createContent as $remoteId => $resourceReference) {
             $createImportRecordsJson[] = $this->buildImportRecordJson($remoteId, $resourceReference);
+            $itemIds[] = $resourceReference->id();
         }
+
+        $this->logger->info(sprintf('Created Omeka S items: %s', implode(', ', $itemIds)));
+        $this->flushEntityManager();
 
         $createImportRecordResponse = $this->api->batchCreate('omekaimport_records', $createImportRecordsJson, [], ['continueOnError' => true]);
     }
@@ -337,9 +352,12 @@ class Import extends AbstractJob
         $resourceJson['o:resource_class'] = ['o:id' => $resourceClassId];
         $resourceJson['o:resource_template'] = ['o:id' => $resourceTemplateId];
         $resourceJson = array_merge($resourceJson, $this->buildPropertyJson($importData));
-        $mediaJson = $this->buildMediaJson($importData);
-        $mediaJson = $this->buildHtmlMediaJson($importData, $mediaJson);
-        $resourceJson = array_merge($resourceJson, $mediaJson);
+
+        if (isset($importData['files'])) {
+            $mediaJson = $this->buildMediaJson($importData);
+            $mediaJson = $this->buildHtmlMediaJson($importData, $mediaJson);
+            $resourceJson = array_merge($resourceJson, $mediaJson);
+        }
 
         foreach ($importerClasses as $importerClass) {
             $importer = new $importerClass($this->client, $this->getServiceLocator());
@@ -375,18 +393,36 @@ class Import extends AbstractJob
     {
         //another query to get the filesData from the importData
         $itemId = $importData['id'];
-        $response = $this->client->files->get(['item' => $itemId]);
-        $filesData = json_decode($response->getBody(), true);
-        $mediaJson = ['o:media' => []];
-        foreach ($filesData as $fileData) {
-            $fileJson = [
-                'o:ingester' => 'url',
-                'o:source' => $fileData['original_filename'],
-                'ingest_url' => $fileData['file_urls']['original'],
-            ];
-            $fileJson = array_merge($fileJson, $this->buildPropertyJson($fileData));
-            $mediaJson['o:media'][] = $fileJson;
-        }
+        $params = [
+            'item' => $itemId,
+        ];
+        $page = 1;
+
+        do {
+            $params['page'] = $page;
+            $response = $this->client->files->get($params);
+            $filesData = json_decode($response->getBody(), true);
+            $mediaJson = ['o:media' => []];
+            foreach ($filesData as $fileData) {
+                $url = $fileData['file_urls']['original'];
+                $path = parse_url($url, PHP_URL_PATH);
+                $local_path = sprintf('%s/files/classic/%s', OMEKA_PATH, preg_replace('|^/files/original/|', '', $path));
+                if (file_exists($local_path)) {
+                    $fileJson = [
+                        'o:ingester' => 'local',
+                        'o:source' => $fileData['original_filename'],
+                        'ingest_filename' => $local_path,
+                        'original_file_action' => 'delete',
+                    ];
+                    $fileJson = array_merge($fileJson, $this->buildPropertyJson($fileData));
+                    $mediaJson['o:media'][] = $fileJson;
+                } else {
+                    $this->logger->err(sprintf('File not found: %s (Classic item: %d, file: %d)', $local_path, $itemId, $fileData['id']));
+                    $this->flushEntityManager();
+                }
+            }
+            ++$page;
+        } while ($this->hasNextPage($response) && !$this->shouldStop());
 
         return $mediaJson;
     }
@@ -453,5 +489,11 @@ class Import extends AbstractJob
         $linksHeaders = $response->getHeaders()->get('Link')->toString();
 
         return strpos($linksHeaders, 'rel="next"');
+    }
+
+    protected function flushEntityManager(): void
+    {
+        $em = $this->getServiceLocator()->get('Omeka\EntityManager');
+        $em->flush();
     }
 }
