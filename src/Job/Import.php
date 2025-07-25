@@ -375,18 +375,24 @@ class Import extends AbstractJob
     {
         //another query to get the filesData from the importData
         $itemId = $importData['id'];
-        $response = $this->client->files->get(['item' => $itemId]);
-        $filesData = json_decode($response->getBody(), true);
         $mediaJson = ['o:media' => []];
-        foreach ($filesData as $fileData) {
-            $fileJson = [
-                'o:ingester' => 'url',
-                'o:source' => $fileData['original_filename'],
-                'ingest_url' => $fileData['file_urls']['original'],
-            ];
-            $fileJson = array_merge($fileJson, $this->buildPropertyJson($fileData));
-            $mediaJson['o:media'][] = $fileJson;
-        }
+        $params = ['item' => $itemId];
+        $page = 1;
+        do {
+            $params['page'] = $page;
+            $response = $this->client->files->get($params);
+            $filesData = json_decode($response->getBody(), true);
+            foreach ($filesData as $fileData) {
+                $fileJson = [
+                    'o:ingester' => 'url',
+                    'o:source' => $fileData['original_filename'],
+                    'ingest_url' => $fileData['file_urls']['original'],
+                ];
+                $fileJson = array_merge($fileJson, $this->buildPropertyJson($fileData));
+                $mediaJson['o:media'][] = $fileJson;
+            }
+            ++$page;
+        } while ($this->hasNextPage($response) && !$this->shouldStop());
 
         return $mediaJson;
     }
