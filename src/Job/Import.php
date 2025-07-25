@@ -337,9 +337,12 @@ class Import extends AbstractJob
         $resourceJson['o:resource_class'] = ['o:id' => $resourceClassId];
         $resourceJson['o:resource_template'] = ['o:id' => $resourceTemplateId];
         $resourceJson = array_merge($resourceJson, $this->buildPropertyJson($importData));
-        $mediaJson = $this->buildMediaJson($importData);
-        $mediaJson = $this->buildHtmlMediaJson($importData, $mediaJson);
-        $resourceJson = array_merge($resourceJson, $mediaJson);
+
+        if (isset($importData['files'])) {
+            $mediaJson = $this->buildMediaJson($importData);
+            $mediaJson = $this->buildHtmlMediaJson($importData, $mediaJson);
+            $resourceJson = array_merge($resourceJson, $mediaJson);
+        }
 
         foreach ($importerClasses as $importerClass) {
             $importer = new $importerClass($this->client, $this->getServiceLocator());
