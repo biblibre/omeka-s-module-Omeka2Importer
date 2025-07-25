@@ -393,16 +393,14 @@ class Import extends AbstractJob
     {
         //another query to get the filesData from the importData
         $itemId = $importData['id'];
-        $params = [
-            'item' => $itemId,
-        ];
+        $mediaJson = ['o:media' => []];
+        $params = ['item' => $itemId];
         $page = 1;
 
         do {
             $params['page'] = $page;
             $response = $this->client->files->get($params);
             $filesData = json_decode($response->getBody(), true);
-            $mediaJson = ['o:media' => []];
             foreach ($filesData as $fileData) {
                 $url = $fileData['file_urls']['original'];
                 $path = parse_url($url, PHP_URL_PATH);
